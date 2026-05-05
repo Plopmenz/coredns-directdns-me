@@ -11,8 +11,8 @@ import (
 )
 
 type DirectDNSMe struct {
-    next plugin.Handler
-    zone string
+    Next plugin.Handler
+    Zones []string
 }
 
 func (d *DirectDNSMe) Name() string {
@@ -27,21 +27,20 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
     q := r.Question[0]
     qname := q.Name
     qtype := q.Qtype
-
-    // Normalize zone to have trailing dot
-    zone := d.zone
-    if !strings.HasSuffix(zone, ".") {
-        zone = zone + "."
-    }
+    log.Printf("[directdns_me] ENTRY qname=%s qtype=%d", qname, qtype)
 
     // Pass through non-matching zones
-    if !strings.HasSuffix(qname, zone) {
-        return plugin.NextOrFailure(d.Name(), d.next, ctx, w, r)
+    zone := d.matchZone(qname)
+    log.Printf("[directdns_me] MATCHED zone=%s from zones=%s", zone, d.Zones)
+    if zone == "" {
+        log.Printf("[directdns_me] PASSING to next plugin")
+        return plugin.NextOrFailure(d.Name(), d.Next, ctx, w, r)
     }
 
     // Extract prefix (part before our zone)
     prefix := strings.TrimSuffix(qname, zone)
     prefix = strings.TrimSuffix(prefix, ".")
+    log.Printf("[directdns_me] prefix=%s", prefix)
 
     // Get self info on demand (no caching)
     self, err := getSelf()
@@ -51,6 +50,7 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
     }
     ipv6 := self.Address
     ipv6Enc := strings.ReplaceAll(ipv6, ":", "-")
+    log.Printf("[directdns_me] ipv6=%s ipv6Enc=%s", ipv6, ipv6Enc)
 
     // Case 1: AAAA query for <ipv6-enc>.<zone>
     if prefix == ipv6Enc {
@@ -159,5 +159,14 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
     }
 
     // No matching subdomain pattern - pass to next plugin
-    return plugin.NextOrFailure(d.Name(), d.next, ctx, w, r)
+    return plugin.NextOrFailure(d.Name(), d.Next, ctx, w, r)
+}
+
+func (d *DirectDNSMe) matchZone(qname string) string {
+    for _, zone := range d.Zones {
+        if plugin.Name(zone).Matches(qname) {
+            return zone
+        }
+    }
+    return ""
 }

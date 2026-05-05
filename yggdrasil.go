@@ -1,9 +1,11 @@
 package directdns_me
 
 import (
+    "context"
     "encoding/json"
     "fmt"
     "os/exec"
+    "time"
 )
 
 type SelfInfo struct {
@@ -21,9 +23,16 @@ type PeersResponse struct {
 
 type NodeInfo map[string]interface{}
 
+func runYggdrasil(args ...string) ([]byte, error) {
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+
+    cmd := exec.CommandContext(ctx, "yggdrasilctl", args...)
+    return cmd.Output()
+}
+
 func getSelf() (*SelfInfo, error) {
-    cmd := exec.Command("yggdrasilctl", "-json", "getself")
-    out, err := cmd.Output()
+    out, err := runYggdrasil("-json", "getself")
     if err != nil {
         return nil, fmt.Errorf("yggdrasilctl getself: %w", err)
     }
@@ -36,8 +45,7 @@ func getSelf() (*SelfInfo, error) {
 }
 
 func getPeers() (*PeersResponse, error) {
-    cmd := exec.Command("yggdrasilctl", "-json", "getPeers")
-    out, err := cmd.Output()
+    out, err := runYggdrasil("-json", "getPeers")
     if err != nil {
         return nil, fmt.Errorf("yggdrasilctl getPeers: %w", err)
     }
@@ -50,8 +58,7 @@ func getPeers() (*PeersResponse, error) {
 }
 
 func getNodeInfo(key string) (NodeInfo, error) {
-    cmd := exec.Command("yggdrasilctl", "-json", fmt.Sprintf("getnodeinfo key=%s", key))
-    out, err := cmd.Output()
+    out, err := runYggdrasil("-json", "getnodeinfo", fmt.Sprintf("key=%s", key))
     if err != nil {
         return nil, fmt.Errorf("yggdrasilctl getnodeinfo: %w", err)
     }
