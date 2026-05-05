@@ -2,11 +2,11 @@ package directdns_me
 
 import (
     "context"
-    "log"
     "net"
     "strings"
 
     "github.com/coredns/coredns/plugin"
+    "github.com/coredns/coredns/plugin/pkg/log"
     "github.com/miekg/dns"
 )
 
@@ -27,37 +27,37 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
     q := r.Question[0]
     qname := q.Name
     qtype := q.Qtype
-    log.Printf("[directdns_me] ENTRY qname=%s qtype=%d", qname, qtype)
+    log.Debugf("[directdns_me] ENTRY qname=%s qtype=%d", qname, qtype)
 
     // Pass through non-matching zones
     zone := d.matchZone(qname)
-    log.Printf("[directdns_me] MATCHED zone=%s from zones=%s", zone, d.Zones)
+    log.Debugf("[directdns_me] MATCHED zone=%s from zones=%s", zone, d.Zones)
     if zone == "" {
-        log.Printf("[directdns_me] PASSING to next plugin")
+        log.Debugf("[directdns_me] PASSING to next plugin")
         return plugin.NextOrFailure(d.Name(), d.Next, ctx, w, r)
     }
 
     // Extract prefix (part before our zone)
     prefix := strings.TrimSuffix(qname, zone)
     prefix = strings.TrimSuffix(prefix, ".")
-    log.Printf("[directdns_me] prefix=%s", prefix)
+    log.Debugf("[directdns_me] prefix=%s", prefix)
 
     // Get self info on demand (no caching)
     self, err := getSelf()
     if err != nil {
-        log.Printf("[directdns_me] getself failed: %v", err)
+        log.Debugf("[directdns_me] getself failed: %v", err)
         return dns.RcodeServerFailure, err
     }
     ipv6 := self.Address
     ipv6Enc := strings.ReplaceAll(ipv6, ":", "-")
-    log.Printf("[directdns_me] ipv6=%s ipv6Enc=%s", ipv6, ipv6Enc)
+    log.Debugf("[directdns_me] ipv6=%s ipv6Enc=%s", ipv6, ipv6Enc)
 
     // Case 1: AAAA query for <ipv6-enc>.<zone>
     if prefix == ipv6Enc {
         if qtype == dns.TypeAAAA {
             ip := net.ParseIP(ipv6)
             if ip == nil {
-                log.Printf("[directdns_me] invalid IPv6 address: %s", ipv6)
+                log.Debugf("[directdns_me] invalid IPv6 address: %s", ipv6)
                 return dns.RcodeServerFailure, nil
             }
 
@@ -90,7 +90,7 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
     if prefix == "_public_dns."+ipv6Enc {
         peers, err := getPeers()
         if err != nil {
-            log.Printf("[directdns_me] getPeers failed: %v", err)
+            log.Debugf("[directdns_me] getPeers failed: %v", err)
             return dns.RcodeServerFailure, err
         }
         if len(peers.Peers) == 0 {
@@ -104,13 +104,13 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 
         nodeInfo, err := getNodeInfo(firstPeer.Key)
         if err != nil {
-            log.Printf("[directdns_me] getNodeInfo failed for peer %s: %v", firstPeer.Key, err)
+            log.Debugf("[directdns_me] getNodeInfo failed for peer %s: %v", firstPeer.Key, err)
             return dns.RcodeServerFailure, err
         }
 
         infoVal, exists := nodeInfo[firstPeer.Key]
         if !exists {
-            log.Printf("[directdns_me] no node info for key %s", firstPeer.Key)
+            log.Debugf("[directdns_me] no node info for key %s", firstPeer.Key)
             msg := new(dns.Msg)
             msg.SetReply(r)
             msg.Authoritative = true
@@ -119,7 +119,7 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
         }
         infoMap, ok := infoVal.(map[string]interface{})
         if !ok {
-            log.Printf("[directdns_me] invalid node info format for key %s", firstPeer.Key)
+            log.Debugf("[directdns_me] invalid node info format for key %s", firstPeer.Key)
             msg := new(dns.Msg)
             msg.SetReply(r)
             msg.Authoritative = true
@@ -128,7 +128,7 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
         }
         publicDNS, ok := infoMap["_public_dns"].(string)
         if !ok {
-            log.Printf("[directdns_me] no _public_dns for peer %s", firstPeer.Key)
+            log.Debugf("[directdns_me] no _public_dns for peer %s", firstPeer.Key)
             msg := new(dns.Msg)
             msg.SetReply(r)
             msg.Authoritative = true
