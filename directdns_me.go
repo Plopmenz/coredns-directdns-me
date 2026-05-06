@@ -11,6 +11,55 @@ import (
     "github.com/miekg/dns"
 )
 
+func getPublicAddresses(qtype uint16) []net.IP {
+    var ips []net.IP
+
+    interfaces, err := net.Interfaces()
+    if err != nil {
+        return ips
+    }
+
+    for _, iface := range interfaces {
+        // Skip loopback and ygg0
+        if iface.Name == "lo" || iface.Name == "ygg0" {
+            continue
+        }
+
+        addrs, err := iface.Addrs()
+        if err != nil {
+            continue
+        }
+
+        for _, addr := range addrs {
+            ipNet, ok := addr.(*net.IPNet)
+            if !ok {
+                continue
+            }
+
+            ip := ipNet.IP
+
+            // Exclude non-public addresses
+            if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+               ip.IsPrivate() || ip.IsMulticast() || !ip.IsGlobalUnicast() {
+                continue
+            }
+
+            // Exclude unspecified address (0.0.0.0 or ::)
+            if ip.IsUnspecified() {
+                continue
+            }
+
+            if qtype == dns.TypeA && ip.To4() != nil {
+                ips = append(ips, ip)
+            } else if qtype == dns.TypeAAAA && ip.To4() == nil && ip.To16() != nil {
+                ips = append(ips, ip)
+            }
+        }
+    }
+
+    return ips
+}
+
 type DirectDNSMe struct {
     Next plugin.Handler
     Zones []string
@@ -89,6 +138,43 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 
     // Case 2: CNAME record at _public_dns.<ipv6-enc>.<zone>
     if prefix == "_public_dns."+ipv6Enc {
+        // Early termination: check for public addresses on network interfaces
+        publicIPs := getPublicAddresses(qtype)
+        if len(publicIPs) > 0 {
+            log.Debugf("[directdns_me] found %d public IPs, responding directly", len(publicIPs))
+            msg := new(dns.Msg)
+            msg.SetReply(r)
+            msg.Authoritative = true
+
+            for _, ip := range publicIPs {
+                if qtype == dns.TypeA {
+                    msg.Answer = append(msg.Answer, &dns.A{
+                        Hdr: dns.RR_Header{
+                            Name:   qname,
+                            Rrtype: dns.TypeA,
+                            Class:  dns.ClassINET,
+                            Ttl:    60,
+                        },
+                        A: ip,
+                    })
+                } else if qtype == dns.TypeAAAA {
+                    msg.Answer = append(msg.Answer, &dns.AAAA{
+                        Hdr: dns.RR_Header{
+                            Name:   qname,
+                            Rrtype: dns.TypeAAAA,
+                            Class:  dns.ClassINET,
+                            Ttl:    60,
+                        },
+                        AAAA: ip,
+                    })
+                }
+            }
+
+            w.WriteMsg(msg)
+            return dns.RcodeSuccess, nil
+        }
+
+        // Fall back to DNS query via peer
         peers, err := getPeers()
         if err != nil {
             log.Debugf("[directdns_me] getPeers failed: %v", err)
