@@ -8,10 +8,11 @@ import (
 
     "github.com/coredns/coredns/plugin"
     "github.com/coredns/coredns/plugin/pkg/log"
+    "github.com/coredns/coredns/request"
     "github.com/miekg/dns"
 )
 
-func getPublicAddresses(qtype uint16) []net.IP {
+func getPublicAddresses(qtype string) []net.IP {
     var ips []net.IP
 
     interfaces, err := net.Interfaces()
@@ -49,9 +50,9 @@ func getPublicAddresses(qtype uint16) []net.IP {
                 continue
             }
 
-            if qtype == dns.TypeA && ip.To4() != nil {
+            if qtype == "A" && ip.To4() != nil {
                 ips = append(ips, ip)
-            } else if qtype == dns.TypeAAAA && ip.To4() == nil && ip.To16() != nil {
+            } else if qtype == "AAAA" && ip.To4() == nil && ip.To16() != nil {
                 ips = append(ips, ip)
             }
         }
@@ -70,13 +71,9 @@ func (d *DirectDNSMe) Name() string {
 }
 
 func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-    if len(r.Question) == 0 {
-        return dns.RcodeFormatError, nil
-    }
-
-    q := r.Question[0]
-    qname := q.Name
-    qtype := q.Qtype
+    state := request.Request{W: w, Req: r}
+    qname := state.Name()
+    qtype := state.Type()
     log.Debugf("[directdns_me] ENTRY qname=%s qtype=%d", qname, qtype)
 
     // Pass through non-matching zones
@@ -104,7 +101,7 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 
     // Case 1: AAAA query for <ipv6-enc>.<zone>
     if prefix == ipv6Enc {
-        if qtype == dns.TypeAAAA {
+        if qtype == "AAAA" {
             ip := net.ParseIP(ipv6)
             if ip == nil {
                 log.Debugf("[directdns_me] invalid IPv6 address: %s", ipv6)
@@ -147,7 +144,7 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
             msg.Authoritative = true
 
             for _, ip := range publicIPs {
-                if qtype == dns.TypeA {
+                if qtype == "A" {
                     msg.Answer = append(msg.Answer, &dns.A{
                         Hdr: dns.RR_Header{
                             Name:   qname,
@@ -157,7 +154,7 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
                         },
                         A: ip,
                     })
-                } else if qtype == dns.TypeAAAA {
+                } else if qtype == "AAAA" {
                     msg.Answer = append(msg.Answer, &dns.AAAA{
                         Hdr: dns.RR_Header{
                             Name:   qname,
@@ -191,16 +188,7 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 
         peerIPv6 := firstPeer.Address
         peerIPv6Enc := strings.ReplaceAll(peerIPv6, ":", "-")
-        dnsQueryName := fmt.Sprintf("_public_dns.%s.yggdrasil.trustless.cloud.", peerIPv6Enc)
-        cnameTarget := dnsQueryName
-
-        log.Debugf("[directdns_me] querying DNS for %s using peer %s", dnsQueryName, peerIPv6)
-
-        // Query the DNS name using localhost resolver or peer's IPv6
-        dnsResults, err := queryDNS(dnsQueryName, qtype, peerIPv6)
-        if err != nil {
-            log.Debugf("[directdns_me] DNS query failed for %s: %v", dnsQueryName, err)
-        }
+        cnameTarget := fmt.Sprintf("_public_dns.%s.%s", peerIPv6Enc, zone)
 
         msg := new(dns.Msg)
         msg.SetReply(r)
@@ -217,11 +205,6 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
             Target: cnameTarget,
         }
         msg.Answer = append(msg.Answer, cname)
-
-        // Add the DNS query results
-        if dnsResults != nil {
-            msg.Answer = append(msg.Answer, dnsResults...)
-        }
 
         w.WriteMsg(msg)
         return dns.RcodeSuccess, nil
