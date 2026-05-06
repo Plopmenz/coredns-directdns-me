@@ -6,6 +6,8 @@ import (
     "fmt"
     "os/exec"
     "time"
+
+    "github.com/miekg/dns"
 )
 
 type SelfInfo struct {
@@ -13,8 +15,9 @@ type SelfInfo struct {
 }
 
 type Peer struct {
-    Key  string `json:"key"`
-    Port int    `json:"port"`
+    Key     string `json:"key"`
+    Port    int    `json:"port"`
+    Address string `json:"address"`
 }
 
 type PeersResponse struct {
@@ -68,4 +71,32 @@ func getNodeInfo(key string) (NodeInfo, error) {
         return nil, fmt.Errorf("parse getnodeinfo: %w", err)
     }
     return info, nil
+}
+
+func queryDNS(name string, qtype uint16, peerIPv6 ...string) ([]dns.RR, error) {
+    c := new(dns.Client)
+    m := new(dns.Msg)
+    m.SetQuestion(name, qtype)
+    m.RecursionDesired = true
+
+    // Try localhost first, then try using the yggdrasil network via the peer
+    servers := []string{"127.0.0.1:53", "[::1]:53"}
+    for _, ipv6 := range peerIPv6 {
+        servers = append(servers, fmt.Sprintf("[%s]:53", ipv6))
+    }
+    var lastErr error
+
+    for _, server := range servers {
+        resp, _, err := c.Exchange(m, server)
+        if err != nil {
+            lastErr = err
+            continue
+        }
+        if resp.Rcode != dns.RcodeSuccess {
+            lastErr = fmt.Errorf("DNS query failed with rcode %d", resp.Rcode)
+            continue
+        }
+        return resp.Answer, nil
+    }
+    return nil, lastErr
 }

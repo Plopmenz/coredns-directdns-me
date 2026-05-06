@@ -2,6 +2,7 @@ package directdns_me
 
 import (
     "context"
+    "fmt"
     "net"
     "strings"
 
@@ -102,58 +103,40 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
         }
         firstPeer := peers.Peers[0]
 
-        nodeInfo, err := getNodeInfo(firstPeer.Key)
+        peerIPv6 := firstPeer.Address
+        peerIPv6Enc := strings.ReplaceAll(peerIPv6, ":", "-")
+        dnsQueryName := fmt.Sprintf("_public_dns.%s.yggdrasil.trustless.cloud.", peerIPv6Enc)
+        cnameTarget := dnsQueryName
+
+        log.Debugf("[directdns_me] querying DNS for %s using peer %s", dnsQueryName, peerIPv6)
+
+        // Query the DNS name using localhost resolver or peer's IPv6
+        dnsResults, err := queryDNS(dnsQueryName, qtype, peerIPv6)
         if err != nil {
-            log.Debugf("[directdns_me] getNodeInfo failed for peer %s: %v", firstPeer.Key, err)
-            return dns.RcodeServerFailure, err
+            log.Debugf("[directdns_me] DNS query failed for %s: %v", dnsQueryName, err)
         }
 
-        infoVal, exists := nodeInfo[firstPeer.Key]
-        if !exists {
-            log.Debugf("[directdns_me] no node info for key %s", firstPeer.Key)
-            msg := new(dns.Msg)
-            msg.SetReply(r)
-            msg.Authoritative = true
-            w.WriteMsg(msg)
-            return dns.RcodeSuccess, nil
-        }
-        infoMap, ok := infoVal.(map[string]interface{})
-        if !ok {
-            log.Debugf("[directdns_me] invalid node info format for key %s", firstPeer.Key)
-            msg := new(dns.Msg)
-            msg.SetReply(r)
-            msg.Authoritative = true
-            w.WriteMsg(msg)
-            return dns.RcodeSuccess, nil
-        }
-        publicDNS, ok := infoMap["_public_dns"].(string)
-        if !ok {
-            log.Debugf("[directdns_me] no _public_dns for peer %s", firstPeer.Key)
-            msg := new(dns.Msg)
-            msg.SetReply(r)
-            msg.Authoritative = true
-            w.WriteMsg(msg)
-            return dns.RcodeSuccess, nil
-        }
-
-        cnameTarget := publicDNS
-        if !strings.HasSuffix(cnameTarget, ".") {
-            cnameTarget += "."
-        }
         msg := new(dns.Msg)
         msg.SetReply(r)
         msg.Authoritative = true
-        msg.Answer = []dns.RR{
-            &dns.CNAME{
-                Hdr: dns.RR_Header{
-                    Name:   qname,
-                    Rrtype: dns.TypeCNAME,
-                    Class:  dns.ClassINET,
-                    Ttl:    60,
-                },
-                Target: cnameTarget,
+
+        // Add CNAME record pointing to the peer's DNS name
+        cname := &dns.CNAME{
+            Hdr: dns.RR_Header{
+                Name:   qname,
+                Rrtype: dns.TypeCNAME,
+                Class:  dns.ClassINET,
+                Ttl:    60,
             },
+            Target: cnameTarget,
         }
+        msg.Answer = append(msg.Answer, cname)
+
+        // Add the DNS query results
+        if dnsResults != nil {
+            msg.Answer = append(msg.Answer, dnsResults...)
+        }
+
         w.WriteMsg(msg)
         return dns.RcodeSuccess, nil
     }
