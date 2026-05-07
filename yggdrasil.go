@@ -14,8 +14,9 @@ type SelfInfo struct {
 
 type Peer struct {
     Key     string `json:"key"`
-    Port    int    `json:"port"`
-    Address string `json:"address"`
+    Address     string `json:"address"`
+    Remote string `json:"remote"`
+    Cost    int    `json:"cost"`
 }
 
 type PeersResponse struct {

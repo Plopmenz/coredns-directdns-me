@@ -4,6 +4,7 @@ import (
     "context"
     "fmt"
     "net"
+    "sort"
     "strings"
 
     "github.com/coredns/coredns/plugin"
@@ -184,9 +185,18 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
             w.WriteMsg(msg)
             return dns.RcodeSuccess, nil
         }
-        firstPeer := peers.Peers[0]
+        // Sort peers by link local last, then lowest cost
+        sort.Slice(peers.Peers, func(i, j int) bool {
+            iIsLinkLocal := strings.Contains(peers.Peers[i].Remote, "%")
+            jIsLinkLocal := strings.Contains(peers.Peers[j].Remote, "%")
+            if iIsLinkLocal != jIsLinkLocal {
+                return !iIsLinkLocal
+            }
+            return peers.Peers[i].Cost < peers.Peers[j].Cost
+        })
+        peer := peers.Peers[0]
 
-        peerIPv6 := firstPeer.Address
+        peerIPv6 := peer.Address
         peerIPv6Enc := strings.ReplaceAll(peerIPv6, ":", "-")
         cnameTarget := fmt.Sprintf("_public_dns.%s.%s", peerIPv6Enc, zone)
 
