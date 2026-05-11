@@ -6,6 +6,7 @@ import (
     "net"
     "sort"
     "strings"
+    "time"
 
     "github.com/coredns/coredns/plugin"
     "github.com/coredns/coredns/plugin/pkg/log"
@@ -216,6 +217,16 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
         }
         msg.Answer = append(msg.Answer, cname)
 
+        // Attempt to resolve CNAME
+        log.Debugf("[directdns_me] querying IPv6 %s for CNAME target %s", peerIPv6, cname.Target)
+        ipv6Resp, err := forwardToNodeWithName(r, ipv6, cname.Target)
+        if err != nil {
+            log.Debugf("[directdns_me] IPv6 query failed: %v", err)
+        }
+        if ipv6Resp != nil {
+            msg.Answer = append(msg.Answer, ipv6Resp.Answer...)
+        }
+
         w.WriteMsg(msg)
         return dns.RcodeSuccess, nil
     }
@@ -231,4 +242,21 @@ func (d *DirectDNSMe) matchZone(qname string) string {
         }
     }
     return ""
+}
+
+
+func forwardToNodeWithName(req *dns.Msg, ipv6 string, name string) (*dns.Msg, error) {
+    newReq := req.Copy()
+    if len(newReq.Question) > 0 {
+        newReq.Question[0].Name = dns.Fqdn(name)
+    }
+
+    c := &dns.Client{
+        Net:     "udp",
+        Timeout: 2 * time.Second,
+    }
+
+    addr := "[" + ipv6 + "]:53"
+    resp, _, err := c.Exchange(newReq, addr)
+    return resp, err
 }
