@@ -127,7 +127,8 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
             w.WriteMsg(msg)
             return dns.RcodeSuccess, nil
         }
-        // Name exists but no record of requested type
+
+        // No record of requested type
         msg := new(dns.Msg)
         msg.SetReply(r)
         msg.Authoritative = true
@@ -137,96 +138,105 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 
     // Case 2: CNAME record at _public_dns.<ipv6-enc>.<zone>
     if prefix == "_public_dns."+ipv6Enc {
-        // Early termination: check for public addresses on network interfaces
-        publicIPs := getPublicAddresses(qtype)
-        if len(publicIPs) > 0 {
-            log.Debugf("[directdns_me] found %d public IPs, responding directly", len(publicIPs))
-            msg := new(dns.Msg)
-            msg.SetReply(r)
-            msg.Authoritative = true
+        if qtype == "A" || qtype == "AAAA" {
+            // Early termination: check for public addresses on network interfaces
+            publicIPs := getPublicAddresses(qtype)
+            if len(publicIPs) > 0 {
+                log.Debugf("[directdns_me] found %d public IPs, responding directly", len(publicIPs))
+                msg := new(dns.Msg)
+                msg.SetReply(r)
+                msg.Authoritative = true
 
-            for _, ip := range publicIPs {
-                if qtype == "A" {
-                    msg.Answer = append(msg.Answer, &dns.A{
-                        Hdr: dns.RR_Header{
-                            Name:   qname,
-                            Rrtype: dns.TypeA,
-                            Class:  dns.ClassINET,
-                            Ttl:    60,
-                        },
-                        A: ip,
-                    })
-                } else if qtype == "AAAA" {
-                    msg.Answer = append(msg.Answer, &dns.AAAA{
-                        Hdr: dns.RR_Header{
-                            Name:   qname,
-                            Rrtype: dns.TypeAAAA,
-                            Class:  dns.ClassINET,
-                            Ttl:    60,
-                        },
-                        AAAA: ip,
-                    })
+                for _, ip := range publicIPs {
+                    if qtype == "A" {
+                        msg.Answer = append(msg.Answer, &dns.A{
+                            Hdr: dns.RR_Header{
+                                Name:   qname,
+                                Rrtype: dns.TypeA,
+                                Class:  dns.ClassINET,
+                                Ttl:    60,
+                            },
+                            A: ip,
+                        })
+                    } else if qtype == "AAAA" {
+                        msg.Answer = append(msg.Answer, &dns.AAAA{
+                            Hdr: dns.RR_Header{
+                                Name:   qname,
+                                Rrtype: dns.TypeAAAA,
+                                Class:  dns.ClassINET,
+                                Ttl:    60,
+                            },
+                            AAAA: ip,
+                        })
+                    }
                 }
+
+                w.WriteMsg(msg)
+                return dns.RcodeSuccess, nil
             }
 
-            w.WriteMsg(msg)
-            return dns.RcodeSuccess, nil
-        }
+            // Fall back to DNS query via peer
+            peers, err := getPeers()
+            if err != nil {
+                log.Debugf("[directdns_me] getPeers failed: %v", err)
+                return dns.RcodeServerFailure, err
+            }
+            if len(peers.Peers) == 0 {
+                msg := new(dns.Msg)
+                msg.SetReply(r)
+                msg.Authoritative = true
+                w.WriteMsg(msg)
+                return dns.RcodeSuccess, nil
+            }
+            // Sort peers by link local last, then lowest cost
+            sort.Slice(peers.Peers, func(i, j int) bool {
+                iIsLinkLocal := strings.Contains(peers.Peers[i].Remote, "%")
+                jIsLinkLocal := strings.Contains(peers.Peers[j].Remote, "%")
+                if iIsLinkLocal != jIsLinkLocal {
+                    return !iIsLinkLocal
+                }
+                return peers.Peers[i].Cost < peers.Peers[j].Cost
+            })
+            peer := peers.Peers[0]
 
-        // Fall back to DNS query via peer
-        peers, err := getPeers()
-        if err != nil {
-            log.Debugf("[directdns_me] getPeers failed: %v", err)
-            return dns.RcodeServerFailure, err
-        }
-        if len(peers.Peers) == 0 {
+            peerIPv6 := peer.Address
+            peerIPv6Enc := strings.ReplaceAll(peerIPv6, ":", "-")
+            cnameTarget := fmt.Sprintf("_public_dns.%s.%s", peerIPv6Enc, zone)
+
             msg := new(dns.Msg)
             msg.SetReply(r)
             msg.Authoritative = true
+
+            // Add CNAME record pointing to the peer's DNS name
+            cname := &dns.CNAME{
+                Hdr: dns.RR_Header{
+                    Name:   qname,
+                    Rrtype: dns.TypeCNAME,
+                    Class:  dns.ClassINET,
+                    Ttl:    60,
+                },
+                Target: cnameTarget,
+            }
+            msg.Answer = append(msg.Answer, cname)
+
+            // Attempt to resolve CNAME
+            log.Debugf("[directdns_me] querying IPv6 %s for CNAME target %s", peerIPv6, cname.Target)
+            ipv6Resp, err := forwardToNodeWithName(r, ipv6, cname.Target)
+            if err != nil {
+                log.Debugf("[directdns_me] IPv6 query failed: %v", err)
+            }
+            if ipv6Resp != nil {
+                msg.Answer = append(msg.Answer, ipv6Resp.Answer...)
+            }
+
             w.WriteMsg(msg)
             return dns.RcodeSuccess, nil
         }
-        // Sort peers by link local last, then lowest cost
-        sort.Slice(peers.Peers, func(i, j int) bool {
-            iIsLinkLocal := strings.Contains(peers.Peers[i].Remote, "%")
-            jIsLinkLocal := strings.Contains(peers.Peers[j].Remote, "%")
-            if iIsLinkLocal != jIsLinkLocal {
-                return !iIsLinkLocal
-            }
-            return peers.Peers[i].Cost < peers.Peers[j].Cost
-        })
-        peer := peers.Peers[0]
 
-        peerIPv6 := peer.Address
-        peerIPv6Enc := strings.ReplaceAll(peerIPv6, ":", "-")
-        cnameTarget := fmt.Sprintf("_public_dns.%s.%s", peerIPv6Enc, zone)
-
+        // No record of requested type
         msg := new(dns.Msg)
         msg.SetReply(r)
         msg.Authoritative = true
-
-        // Add CNAME record pointing to the peer's DNS name
-        cname := &dns.CNAME{
-            Hdr: dns.RR_Header{
-                Name:   qname,
-                Rrtype: dns.TypeCNAME,
-                Class:  dns.ClassINET,
-                Ttl:    60,
-            },
-            Target: cnameTarget,
-        }
-        msg.Answer = append(msg.Answer, cname)
-
-        // Attempt to resolve CNAME
-        log.Debugf("[directdns_me] querying IPv6 %s for CNAME target %s", peerIPv6, cname.Target)
-        ipv6Resp, err := forwardToNodeWithName(r, ipv6, cname.Target)
-        if err != nil {
-            log.Debugf("[directdns_me] IPv6 query failed: %v", err)
-        }
-        if ipv6Resp != nil {
-            msg.Answer = append(msg.Answer, ipv6Resp.Answer...)
-        }
-
         w.WriteMsg(msg)
         return dns.RcodeSuccess, nil
     }
