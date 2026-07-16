@@ -241,6 +241,15 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
         return dns.RcodeSuccess, nil
     }
 
+    // Case 3: no records for anything else ending in <ipv6-enc>.<zone>
+    if strings.HasSuffix(prefix, ipv6Enc) {
+        msg := new(dns.Msg)
+        msg.SetReply(r)
+        msg.Authoritative = true
+        w.WriteMsg(msg)
+        return dns.RcodeSuccess, nil
+    }
+
     // No matching subdomain pattern - pass to next plugin
     return plugin.NextOrFailure(d.Name(), d.Next, ctx, w, r)
 }
