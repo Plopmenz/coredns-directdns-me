@@ -14,12 +14,18 @@ import (
     "github.com/miekg/dns"
 )
 
-func getPublicAddresses(qtype string) []net.IP {
-    var ips []net.IP
+type PublicAddress struct {
+    IP  net.IP
+    TTL uint32
+}
+
+func getPublicAddresses(qtype string) []PublicAddress {
+    var addresses []PublicAddress
+    dhcpLft := dhcpLifetimes()
 
     interfaces, err := net.Interfaces()
     if err != nil {
-        return ips
+        return addresses
     }
 
     for _, iface := range interfaces {
@@ -53,14 +59,14 @@ func getPublicAddresses(qtype string) []net.IP {
             }
 
             if qtype == "A" && ip.To4() != nil {
-                ips = append(ips, ip)
+                addresses = append(addresses, PublicAddress{IP: ip, TTL: publicAddressTTL(ip, dhcpLft)})
             } else if qtype == "AAAA" && ip.To4() == nil && ip.To16() != nil {
-                ips = append(ips, ip)
+                addresses = append(addresses, PublicAddress{IP: ip, TTL: publicAddressTTL(ip, dhcpLft)})
             }
         }
     }
 
-    return ips
+    return addresses
 }
 
 type DirectDNSMe struct {
@@ -76,7 +82,7 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
     state := request.Request{W: w, Req: r}
     qname := state.Name()
     qtype := state.Type()
-    log.Debugf("[directdns_me] ENTRY qname=%s qtype=%d", qname, qtype)
+    log.Debugf("[directdns_me] ENTRY qname=%s qtype=%s", qname, qtype)
 
     // Pass through non-matching zones
     zone := d.matchZone(qname)
@@ -119,7 +125,7 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
                         Name:   qname,
                         Rrtype: dns.TypeAAAA,
                         Class:  dns.ClassINET,
-                        Ttl:    60,
+                        Ttl:    24 * 60 * 60,
                     },
                     AAAA: ip,
                 },
@@ -147,16 +153,17 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
                 msg.SetReply(r)
                 msg.Authoritative = true
 
-                for _, ip := range publicIPs {
+                for _, publicIP := range publicIPs {
+                    log.Debugf("[directdns_me] serving %s %s with TTL %d", qtype, publicIP.IP, publicIP.TTL)
                     if qtype == "A" {
                         msg.Answer = append(msg.Answer, &dns.A{
                             Hdr: dns.RR_Header{
                                 Name:   qname,
                                 Rrtype: dns.TypeA,
                                 Class:  dns.ClassINET,
-                                Ttl:    60,
+                                Ttl:    publicIP.TTL,
                             },
-                            A: ip,
+                            A: publicIP.IP,
                         })
                     } else if qtype == "AAAA" {
                         msg.Answer = append(msg.Answer, &dns.AAAA{
@@ -164,9 +171,9 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
                                 Name:   qname,
                                 Rrtype: dns.TypeAAAA,
                                 Class:  dns.ClassINET,
-                                Ttl:    60,
+                                Ttl:    publicIP.TTL,
                             },
-                            AAAA: ip,
+                            AAAA: publicIP.IP,
                         })
                     }
                 }
@@ -188,12 +195,12 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
                 w.WriteMsg(msg)
                 return dns.RcodeSuccess, nil
             }
-            // Sort peers by link local last, then lowest cost
+            // Sort peers by local last, then lowest cost
             sort.Slice(peers.Peers, func(i, j int) bool {
-                iIsLinkLocal := strings.Contains(peers.Peers[i].Remote, "%")
-                jIsLinkLocal := strings.Contains(peers.Peers[j].Remote, "%")
-                if iIsLinkLocal != jIsLinkLocal {
-                    return !iIsLinkLocal
+                iIsLocal := strings.Contains(peers.Peers[i].Remote, "%") || strings.Contains(peers.Peers[i].Remote, "127.0.0.1")
+                jIsLocal := strings.Contains(peers.Peers[j].Remote, "%") || strings.Contains(peers.Peers[j].Remote, "127.0.0.1")
+                if iIsLocal != jIsLocal {
+                    return !iIsLocal
                 }
                 return peers.Peers[i].Cost < peers.Peers[j].Cost
             })
