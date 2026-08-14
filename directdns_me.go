@@ -6,10 +6,10 @@ import (
     "net"
     "sort"
     "strings"
-    "time"
 
     "github.com/coredns/coredns/plugin"
     "github.com/coredns/coredns/plugin/pkg/log"
+    "github.com/coredns/coredns/plugin/pkg/upstream"
     "github.com/coredns/coredns/request"
     "github.com/miekg/dns"
 )
@@ -70,8 +70,9 @@ func getPublicAddresses(qtype string) []PublicAddress {
 }
 
 type DirectDNSMe struct {
-    Next plugin.Handler
-    Zones []string
+    Next     plugin.Handler
+    Zones    []string
+    upstream *upstream.Upstream
 }
 
 func (d *DirectDNSMe) Name() string {
@@ -226,13 +227,13 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
             }
             msg.Answer = append(msg.Answer, cname)
 
-            // Attempt to resolve CNAME
-            log.Debugf("[directdns_me] querying IPv6 %s for CNAME target %s", peerIPv6, cname.Target)
-            ipv6Resp, err := forwardToNodeWithName(r, ipv6, cname.Target)
+            // Resolve the CNAME target via the local CoreDNS chain
+            log.Debugf("[directdns_me] resolving CNAME target %s via local chain", cname.Target)
+            ipv6Resp, err := d.upstream.Lookup(ctx, state, cname.Target, state.QType())
             if err != nil {
-                log.Debugf("[directdns_me] IPv6 query failed: %v", err)
+                log.Debugf("[directdns_me] local chain lookup failed: %v", err)
             }
-            if ipv6Resp != nil {
+            if ipv6Resp != nil && len(ipv6Resp.Answer) > 0 {
                 msg.Answer = append(msg.Answer, ipv6Resp.Answer...)
             }
 
@@ -268,21 +269,4 @@ func (d *DirectDNSMe) matchZone(qname string) string {
         }
     }
     return ""
-}
-
-
-func forwardToNodeWithName(req *dns.Msg, ipv6 string, name string) (*dns.Msg, error) {
-    newReq := req.Copy()
-    if len(newReq.Question) > 0 {
-        newReq.Question[0].Name = dns.Fqdn(name)
-    }
-
-    c := &dns.Client{
-        Net:     "udp",
-        Timeout: 2 * time.Second,
-    }
-
-    addr := "[" + ipv6 + "]:53"
-    resp, _, err := c.Exchange(newReq, addr)
-    return resp, err
 }

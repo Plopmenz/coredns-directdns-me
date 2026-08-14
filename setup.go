@@ -5,13 +5,14 @@ import (
     "github.com/coredns/coredns/core/dnsserver"
     "github.com/coredns/coredns/plugin"
     "github.com/coredns/coredns/plugin/pkg/log"
+    "github.com/coredns/coredns/plugin/pkg/upstream"
     "github.com/miekg/dns"
 )
 
 func init() { plugin.Register("directdns_me", setup) }
 
 func setup(c *caddy.Controller) error {
-    d := &DirectDNSMe{}
+    d := &DirectDNSMe{upstream: upstream.New()}
     for c.Next() {
         args := c.RemainingArgs()
         if len(args) == 0 {
