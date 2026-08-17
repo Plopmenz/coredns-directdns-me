@@ -143,8 +143,8 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
         return dns.RcodeSuccess, nil
     }
 
-    // Case 2: CNAME record at _public_dns.<ipv6-enc>.<zone>
-    if prefix == "_public_dns."+ipv6Enc {
+    // Case 2: CNAME record at public.directdns.<ipv6-enc>.<zone>
+    if prefix == "public.directdns."+ipv6Enc {
         if qtype == "A" || qtype == "AAAA" {
             // Early termination: check for public addresses on network interfaces
             publicIPs := getPublicAddresses(qtype)
@@ -209,7 +209,7 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 
             peerIPv6 := peer.Address
             peerIPv6Enc := strings.ReplaceAll(peerIPv6, ":", "-")
-            cnameTarget := fmt.Sprintf("_public_dns.%s.%s", peerIPv6Enc, zone)
+            cnameTarget := fmt.Sprintf("public.directdns.%s.%s", peerIPv6Enc, zone)
 
             msg := new(dns.Msg)
             msg.SetReply(r)
