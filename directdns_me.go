@@ -108,8 +108,14 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
     ipv6Enc := strings.ReplaceAll(ipv6, ":", "-")
     log.Debugf("[directdns_me] ipv6=%s ipv6Enc=%s", ipv6, ipv6Enc)
 
+    // Match our own name by address, not by text. A padded spelling of our own
+    // address used to fall through to directdns, which forwarded it to our own
+    // address, i.e. back here, forever.
+    selfIP := net.ParseIP(ipv6)
+    labels := strings.Split(prefix, ".")
+
     // Case 1: AAAA query for <ipv6-enc>.<zone>
-    if prefix == ipv6Enc {
+    if len(labels) == 1 && isSelfLabel(labels[0], selfIP) {
         if qtype == "AAAA" {
             ip := net.ParseIP(ipv6)
             if ip == nil {
@@ -144,7 +150,7 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
     }
 
     // Case 2: CNAME record at public.directdns.<ipv6-enc>.<zone>
-    if prefix == "public.directdns."+ipv6Enc {
+    if len(labels) == 3 && labels[0] == "public" && labels[1] == "directdns" && isSelfLabel(labels[2], selfIP) {
         if qtype == "A" || qtype == "AAAA" {
             // Early termination: check for public addresses on network interfaces
             publicIPs := getPublicAddresses(qtype)
@@ -250,7 +256,7 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
     }
 
     // Case 3: no records for anything else ending in <ipv6-enc>.<zone>
-    if strings.HasSuffix(prefix, ipv6Enc) {
+    if isSelfLabel(labels[len(labels)-1], selfIP) {
         msg := new(dns.Msg)
         msg.SetReply(r)
         msg.Authoritative = true
