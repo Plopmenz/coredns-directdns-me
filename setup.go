@@ -27,7 +27,7 @@ func setup(c *caddy.Controller) error {
 
     dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
         d.Next = next
-        log.Debugf("[directdns_me] plugin instance created, Next is nil: %v", next == nil)
+        log.Debugf("[directdns_me] plugin instance created")
         return d
     })
 

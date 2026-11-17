@@ -5,6 +5,7 @@ import (
     "fmt"
     "net"
     "net/netip"
+    "slices"
     "sort"
     "strings"
 
@@ -127,7 +128,7 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
         return plugin.NextOrFailure(d.Name(), d.Next, ctx, w, r)
     }
 
-    // Get self info on demand (no caching)
+    // Get self info (cached briefly, see getSelf)
     self, err := getSelf()
     if err != nil {
         log.Debugf("[directdns_me] getself failed: %v", err)
@@ -164,8 +165,9 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
             }
         }
 
-        // Case 2: CNAME record at public.directdns.<ipv6-enc>.<zone>
-        if prefix == "public.directdns." {
+        // Case 2: CNAME record at public.directdns.<ipv6-enc>.<zone> or
+        // chain.directdns.<ipv6-enc>.<zone>
+        if prefix == "public.directdns." || prefix == "chain.directdns." {
             if qtype == "A" || qtype == "AAAA" {
                 // Early termination: check for public addresses on network interfaces
                 publicIPs := getPublicAddresses(qtype)
@@ -214,20 +216,23 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
                     w.WriteMsg(msg)
                     return dns.RcodeSuccess, nil
                 }
-                // Sort peers by local last, then lowest cost
-                sort.Slice(peers.Peers, func(i, j int) bool {
-                    iIsLocal := strings.Contains(peers.Peers[i].Remote, "%") || strings.Contains(peers.Peers[i].Remote, "127.0.0.1")
-                    jIsLocal := strings.Contains(peers.Peers[j].Remote, "%") || strings.Contains(peers.Peers[j].Remote, "127.0.0.1")
+                // Sort a copy of the cached peers: getPeers returns a shared
+                // pointer, so sorting the cached slice in place would race with
+                // concurrent queries.
+                peerList := slices.Clone(peers.Peers)
+                sort.Slice(peerList, func(i, j int) bool {
+                    iIsLocal := strings.Contains(peerList[i].Remote, "%") || strings.Contains(peerList[i].Remote, "127.0.0.1")
+                    jIsLocal := strings.Contains(peerList[j].Remote, "%") || strings.Contains(peerList[j].Remote, "127.0.0.1")
                     if iIsLocal != jIsLocal {
                         return !iIsLocal
                     }
-                    return peers.Peers[i].Cost < peers.Peers[j].Cost
+                    return peerList[i].Cost < peerList[j].Cost
                 })
-                peer := peers.Peers[0]
+                peer := peerList[0]
 
                 peerIPv6 := peer.Address
                 peerIPv6Enc := strings.ReplaceAll(peerIPv6, ":", "-")
-                cnameTarget := fmt.Sprintf("public.directdns.%s.%s", peerIPv6Enc, zone)
+                cnameTarget := fmt.Sprintf("%s%s.%s", prefix, peerIPv6Enc, zone)
 
                 // Add CNAME record pointing to the peer's DNS name
                 cname := &dns.CNAME{
@@ -239,7 +244,7 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
                     },
                     Target: cnameTarget,
                 }
-                msg.Answer = append(msg.Answer, cname)
+                answer := []dns.RR{cname}
 
                 // Resolve the CNAME target via the local CoreDNS chain
                 log.Debugf("[directdns_me] resolving CNAME target %s via local chain", cname.Target)
@@ -248,7 +253,15 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
                     log.Debugf("[directdns_me] local chain lookup failed: %v", err)
                 }
                 if ipv6Resp != nil && len(ipv6Resp.Answer) > 0 {
-                    msg.Answer = append(msg.Answer, ipv6Resp.Answer...)
+                    answer = append(answer, ipv6Resp.Answer...)
+                }
+
+                // public.directdns returns a flattened answer, while
+                // chain.directdns keeps the full CNAME chain.
+                if prefix == "public.directdns." {
+                    msg.Answer = flattenCNAMEChain(qname, qtype, answer)
+                } else {
+                    msg.Answer = answer
                 }
 
                 w.WriteMsg(msg)
@@ -265,11 +278,57 @@ func (d *DirectDNSMe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
     return plugin.NextOrFailure(d.Name(), d.Next, ctx, w, r)
 }
 
-func (d *DirectDNSMe) matchZone(qname string) string {
-    for _, zone := range d.Zones {
-        if plugin.Name(zone).Matches(qname) {
-            return zone
+// flattenCNAMEChain drops the CNAME records from answer and returns only the
+// address records, renamed to qname, so the client gets a direct answer without
+// having to follow the chain itself. All returned records carry the minimum TTL
+// of the whole chain, so the client cannot cache an address beyond the point at
+// which any link in the chain (such as the short-lived CNAME) has expired.
+func flattenCNAMEChain(qname, qtype string, answer []dns.RR) []dns.RR {
+    flattened := make([]dns.RR, 0, len(answer))
+    if len(answer) == 0 {
+        return flattened
+    }
+
+    ttl := answer[0].Header().Ttl
+    for _, rr := range answer[1:] {
+        if rr.Header().Ttl < ttl {
+            ttl = rr.Header().Ttl
         }
     }
-    return ""
+
+    for _, rr := range answer {
+        switch rr := rr.(type) {
+        case *dns.A:
+            if qtype != "A" {
+                continue
+            }
+            flattened = append(flattened, &dns.A{
+                Hdr: dns.RR_Header{
+                    Name:   qname,
+                    Rrtype: dns.TypeA,
+                    Class:  rr.Hdr.Class,
+                    Ttl:    ttl,
+                },
+                A: rr.A,
+            })
+        case *dns.AAAA:
+            if qtype != "AAAA" {
+                continue
+            }
+            flattened = append(flattened, &dns.AAAA{
+                Hdr: dns.RR_Header{
+                    Name:   qname,
+                    Rrtype: dns.TypeAAAA,
+                    Class:  rr.Hdr.Class,
+                    Ttl:    ttl,
+                },
+                AAAA: rr.AAAA,
+            })
+        }
+    }
+    return flattened
+}
+
+func (d *DirectDNSMe) matchZone(qname string) string {
+	return plugin.Zones(d.Zones).Matches(qname)
 }

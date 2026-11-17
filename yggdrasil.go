@@ -5,7 +5,25 @@ import (
     "encoding/json"
     "fmt"
     "os/exec"
+    "sync"
     "time"
+)
+
+const (
+    selfCacheTTL  = 1 * time.Minute
+    peersCacheTTL = 5 * time.Second
+)
+
+type cacheEntry[T any] struct {
+    value   T
+    expires time.Time
+}
+
+var (
+    selfCache  cacheEntry[*SelfInfo]
+    selfMu     sync.Mutex
+    peersCache cacheEntry[*PeersResponse]
+    peersMu    sync.Mutex
 )
 
 type SelfInfo struct {
@@ -34,6 +52,13 @@ func runYggdrasil(args ...string) ([]byte, error) {
 }
 
 func getSelf() (*SelfInfo, error) {
+    selfMu.Lock()
+    defer selfMu.Unlock()
+
+    if selfCache.value != nil && time.Now().Before(selfCache.expires) {
+        return selfCache.value, nil
+    }
+
     out, err := runYggdrasil("-json", "getself")
     if err != nil {
         return nil, fmt.Errorf("yggdrasilctl getself: %w", err)
@@ -43,10 +68,18 @@ func getSelf() (*SelfInfo, error) {
     if err := json.Unmarshal(out, &info); err != nil {
         return nil, fmt.Errorf("parse getself: %w", err)
     }
+    selfCache = cacheEntry[*SelfInfo]{value: &info, expires: time.Now().Add(selfCacheTTL)}
     return &info, nil
 }
 
 func getPeers() (*PeersResponse, error) {
+    peersMu.Lock()
+    defer peersMu.Unlock()
+
+    if peersCache.value != nil && time.Now().Before(peersCache.expires) {
+        return peersCache.value, nil
+    }
+
     out, err := runYggdrasil("-json", "getPeers")
     if err != nil {
         return nil, fmt.Errorf("yggdrasilctl getPeers: %w", err)
@@ -56,6 +89,7 @@ func getPeers() (*PeersResponse, error) {
     if err := json.Unmarshal(out, &resp); err != nil {
         return nil, fmt.Errorf("parse getPeers: %w", err)
     }
+    peersCache = cacheEntry[*PeersResponse]{value: &resp, expires: time.Now().Add(peersCacheTTL)}
     return &resp, nil
 }
 
